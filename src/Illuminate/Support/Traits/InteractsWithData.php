@@ -313,7 +313,13 @@ trait InteractsWithData
      */
     public function clamp($key, $min, $max, $default = 0)
     {
-        return Number::clamp($this->data($key, $default), $min, $max);
+        $value = $this->data($key, $default);
+
+        if (! is_numeric($value)) {
+            $value = $default;
+        }
+
+        return Number::clamp($value, $min, $max);
     }
 
     /**
@@ -425,7 +431,9 @@ trait InteractsWithData
      */
     public function array($key = null)
     {
-        return (array) (is_array($key) ? $this->only($key) : $this->data($key));
+        $value = is_array($key) ? $this->only($key) : $this->data($key);
+
+        return is_object($value) ? Arr::from($value) : (array) $value;
     }
 
     /**

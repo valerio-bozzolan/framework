@@ -15,11 +15,11 @@ use Illuminate\Routing\CallableDispatcher;
 use Illuminate\Routing\Contracts\CallableDispatcher as CallableDispatcherContract;
 use Illuminate\Routing\Middleware\SubstituteBindings;
 use Illuminate\Routing\Router;
-use Mockery as m;
+use Illuminate\Tests\Auth\Fixtures\AbilitiesEnum;
 use PHPUnit\Framework\TestCase;
 use stdClass;
 
-include_once 'Enums.php';
+include_once 'Fixtures/Enums.php';
 
 class AuthorizeMiddlewareTest extends TestCase
 {
@@ -65,8 +65,7 @@ class AuthorizeMiddlewareTest extends TestCase
 
     public function testSimpleAbilityUnauthorized()
     {
-        $this->expectException(AuthorizationException::class);
-        $this->expectExceptionMessage('This action is unauthorized.');
+        $this->expectExceptionObject(new AuthorizationException('This action is unauthorized.'));
 
         $this->gate()->define('view-dashboard', function ($user, $additional = null) {
             $this->assertNull($additional);
@@ -227,8 +226,7 @@ class AuthorizeMiddlewareTest extends TestCase
 
     public function testModelTypeUnauthorized()
     {
-        $this->expectException(AuthorizationException::class);
-        $this->expectExceptionMessage('This action is unauthorized.');
+        $this->expectExceptionObject(new AuthorizationException('This action is unauthorized.'));
 
         $this->gate()->define('create', function ($user, $model) {
             $this->assertSame('App\User', $model);
@@ -268,8 +266,7 @@ class AuthorizeMiddlewareTest extends TestCase
 
     public function testModelUnauthorized()
     {
-        $this->expectException(AuthorizationException::class);
-        $this->expectExceptionMessage('This action is unauthorized.');
+        $this->expectExceptionObject(new AuthorizationException('This action is unauthorized.'));
 
         $post = new stdClass;
 
@@ -321,7 +318,7 @@ class AuthorizeMiddlewareTest extends TestCase
 
     public function testModelInstanceAsParameter()
     {
-        $instance = m::mock(Model::class);
+        $instance = new class extends Model {};
 
         $this->gate()->define('success', function ($user, $model) use ($instance) {
             $this->assertSame($model, $instance);
@@ -329,7 +326,7 @@ class AuthorizeMiddlewareTest extends TestCase
             return true;
         });
 
-        $request = m::mock(Request::class);
+        $request = new Request;
 
         $next = function () {
             //

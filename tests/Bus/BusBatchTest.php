@@ -17,11 +17,13 @@ use Illuminate\Container\Container;
 use Illuminate\Contracts\Bus\Dispatcher as BusDispatcher;
 use Illuminate\Contracts\Events\Dispatcher as EventDispatcher;
 use Illuminate\Contracts\Queue\Factory;
+use Illuminate\Contracts\Queue\Queue as QueueContract;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Database\Capsule\Manager as DB;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\PostgresConnection;
 use Illuminate\Database\Query\Builder;
+use Illuminate\Events\Dispatcher as EventsDispatcher;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Foundation\Bus\PendingChain;
 use Illuminate\Queue\CallQueuedClosure;
@@ -29,11 +31,12 @@ use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Bus;
 use Illuminate\Support\Facades\Facade;
 use Illuminate\Support\Facades\Queue;
-use Mockery as m;
+use Illuminate\Support\Testing\Fakes\EventFake;
+use Illuminate\Support\Testing\Fakes\QueueFake;
+use Mockery;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use RuntimeException;
-use stdClass;
 
 class BusBatchTest extends TestCase
 {
@@ -53,23 +56,23 @@ class BusBatchTest extends TestCase
             $container = new Container;
             Facade::setFacadeApplication($container);
 
-            $queue = m::mock(Factory::class);
+            $queue = Mockery::mock(Factory::class);
             $container->instance(Factory::class, $queue);
             $container->alias(Factory::class, 'queue');
 
-            $dispatcher = m::mock(Dispatcher::class, [$container]);
+            $dispatcher = Mockery::mock(Dispatcher::class, [$container]);
 
             $dispatcher->shouldReceive('batch')->zeroOrMoreTimes()->andReturnUsing(function ($jobs) {
-                $pendingBatch = m::mock(PendingBatch::class);
-                $pendingBatch->shouldReceive('name')->andReturnSelf();
-                $pendingBatch->shouldReceive('dispatch')->zeroOrMoreTimes()->andReturn(m::mock(Batch::class));
+                $pendingBatch = Mockery::mock(PendingBatch::class);
+                $pendingBatch->expects('name')->andReturnSelf();
+                $pendingBatch->shouldReceive('dispatch')->zeroOrMoreTimes()->andReturn(Mockery::mock(Batch::class));
 
                 return $pendingBatch;
             })->byDefault();
 
             $dispatcher->shouldReceive('chain')->zeroOrMoreTimes()->andReturnUsing(function ($jobs) {
-                $pendingChain = m::mock(PendingChain::class, [$jobs, \stdClass::class]);
-                $pendingChain->shouldReceive('dispatch')->zeroOrMoreTimes()->andReturn(m::mock(Batch::class));
+                $pendingChain = Mockery::mock(PendingChain::class, [$jobs, \stdClass::class]);
+                $pendingChain->shouldReceive('dispatch')->zeroOrMoreTimes()->andReturn(Mockery::mock(Batch::class));
 
                 return $pendingChain;
             })->byDefault();
@@ -125,7 +128,7 @@ class BusBatchTest extends TestCase
 
     public function test_jobs_can_be_added_to_the_batch()
     {
-        $queue = m::mock(Factory::class);
+        $queue = Mockery::mock(Factory::class);
 
         $batch = $this->createTestBatch($queue);
 
@@ -142,11 +145,12 @@ class BusBatchTest extends TestCase
         $thirdJob = function () {
         };
 
-        $queue->shouldReceive('connection')->once()
+        $connection = Mockery::mock(QueueContract::class);
+        $queue->expects('connection')
             ->with('test-connection')
-            ->andReturn($connection = m::mock(stdClass::class));
+            ->andReturn($connection);
 
-        $connection->shouldReceive('bulk')->once()->with(m::on(function ($args) use ($job, $secondJob) {
+        $connection->expects('bulk')->with(Mockery::on(function ($args) use ($job, $secondJob) {
             return
                 $args[0] == $job &&
                 $args[1] == $secondJob &&
@@ -205,7 +209,7 @@ class BusBatchTest extends TestCase
 
     public function test_processed_jobs_can_be_calculated()
     {
-        $queue = m::mock(Factory::class);
+        $queue = new QueueFake(Container::getInstance());
 
         $batch = $this->createTestBatch($queue);
 
@@ -218,7 +222,7 @@ class BusBatchTest extends TestCase
 
     public function test_successful_jobs_can_be_recorded()
     {
-        $queue = m::mock(Factory::class);
+        $queue = Mockery::mock(Factory::class);
 
         $batch = $this->createTestBatch($queue);
 
@@ -232,11 +236,12 @@ class BusBatchTest extends TestCase
             use Batchable;
         };
 
-        $queue->shouldReceive('connection')->once()
+        $connection = Mockery::mock(QueueContract::class);
+        $queue->expects('connection')
             ->with('test-connection')
-            ->andReturn($connection = m::mock(stdClass::class));
+            ->andReturn($connection);
 
-        $connection->shouldReceive('bulk')->once();
+        $connection->expects('bulk');
 
         $batch = $batch->add([$job, $secondJob]);
         $this->assertEquals(2, $batch->pendingJobs);
@@ -258,9 +263,10 @@ class BusBatchTest extends TestCase
 
     public function test_batch_finished_event_is_dispatched()
     {
-        Container::getInstance()->instance(EventDispatcher::class, $events = m::mock(EventDispatcher::class));
+        $events = new EventFake(new EventsDispatcher);
+        Container::getInstance()->instance(EventDispatcher::class, $events);
 
-        $queue = m::mock(Factory::class);
+        $queue = new QueueFake(Container::getInstance());
         $batch = $this->createTestBatch($queue);
 
         $job = new class
@@ -268,30 +274,28 @@ class BusBatchTest extends TestCase
             use Batchable;
         };
 
-        $queue->shouldReceive('connection')->once()
-            ->with('test-connection')
-            ->andReturn($connection = m::mock(stdClass::class));
-
-        $connection->shouldReceive('bulk')->once();
-
         $batch = $batch->add([$job]);
 
-        $events->shouldReceive('dispatch')->once()->with(m::on(function ($event) use ($batch) {
-            return $event instanceof BatchStarted && $event->batch === $batch;
-        }));
-
-        $events->shouldReceive('dispatch')->once()->with(m::on(function ($event) use ($batch) {
-            return $event instanceof BatchFinished && $event->batch === $batch;
-        }));
-
         $batch->recordSuccessfulJob('test-id');
+
+        $events->assertDispatchedOnce(BatchStarted::class);
+        $events->assertDispatched(BatchStarted::class, function ($event) use ($batch) {
+            return $event->batch === $batch;
+        });
+        $events->assertDispatchedOnce(BatchFinished::class);
+        $events->assertDispatched(BatchFinished::class, function ($event) use ($batch) {
+            return $event->batch->id === $batch->id
+                && $event->batch->finished()
+                && $event->batch->pendingJobs === 0;
+        });
     }
 
     public function test_batch_started_event_is_dispatched()
     {
-        Container::getInstance()->instance(EventDispatcher::class, $events = m::mock(EventDispatcher::class));
+        $events = new EventFake(new EventsDispatcher);
+        Container::getInstance()->instance(EventDispatcher::class, $events);
 
-        $queue = m::mock(Factory::class);
+        $queue = new QueueFake(Container::getInstance());
         $batch = $this->createTestBatch($queue);
 
         $job = new class
@@ -304,31 +308,24 @@ class BusBatchTest extends TestCase
             use Batchable;
         };
 
-        $queue->shouldReceive('connection')->once()
-            ->with('test-connection')
-            ->andReturn($connection = m::mock(stdClass::class));
-
-        $connection->shouldReceive('bulk')->once();
-
         $batch = $batch->add([$job, $secondJob]);
-
-        $events->shouldReceive('dispatch')->once()->with(m::on(function ($event) use ($batch) {
-            return $event instanceof BatchStarted && $event->batch === $batch;
-        }));
-
-        $events->shouldReceive('dispatch')->once()->with(m::on(function ($event) {
-            return $event instanceof BatchFinished;
-        }));
 
         $batch->recordSuccessfulJob('test-id-1');
         $batch->recordSuccessfulJob('test-id-2');
+
+        $events->assertDispatchedOnce(BatchStarted::class);
+        $events->assertDispatched(BatchStarted::class, function ($event) use ($batch) {
+            return $event->batch === $batch;
+        });
+        $events->assertDispatchedOnce(BatchFinished::class);
     }
 
     public function test_batch_started_event_is_dispatched_when_first_job_fails()
     {
-        Container::getInstance()->instance(EventDispatcher::class, $events = m::mock(EventDispatcher::class));
+        $events = new EventFake(new EventsDispatcher);
+        Container::getInstance()->instance(EventDispatcher::class, $events);
 
-        $queue = m::mock(Factory::class);
+        $queue = new QueueFake(Container::getInstance());
         $batch = $this->createTestBatch($queue, $allowFailures = true);
 
         $job = new class
@@ -341,25 +338,20 @@ class BusBatchTest extends TestCase
             use Batchable;
         };
 
-        $queue->shouldReceive('connection')->once()
-            ->with('test-connection')
-            ->andReturn($connection = m::mock(stdClass::class));
-
-        $connection->shouldReceive('bulk')->once();
-
         $batch = $batch->add([$job, $secondJob]);
-
-        $events->shouldReceive('dispatch')->once()->with(m::on(function ($event) use ($batch) {
-            return $event instanceof BatchStarted && $event->batch === $batch;
-        }));
 
         $batch->recordFailedJob('test-id-1', new RuntimeException('Something went wrong.'));
         $batch->recordFailedJob('test-id-2', new RuntimeException('Something else went wrong.'));
+
+        $events->assertDispatchedOnce(BatchStarted::class);
+        $events->assertDispatched(BatchStarted::class, function ($event) use ($batch) {
+            return $event->batch === $batch;
+        });
     }
 
     public function test_failed_jobs_can_be_recorded_while_not_allowing_failures()
     {
-        $queue = m::mock(Factory::class);
+        $queue = Mockery::mock(Factory::class);
 
         $batch = $this->createTestBatch($queue, $allowFailures = false);
 
@@ -373,11 +365,12 @@ class BusBatchTest extends TestCase
             use Batchable;
         };
 
-        $queue->shouldReceive('connection')->once()
+        $connection = Mockery::mock(QueueContract::class);
+        $queue->expects('connection')
             ->with('test-connection')
-            ->andReturn($connection = m::mock(stdClass::class));
+            ->andReturn($connection);
 
-        $connection->shouldReceive('bulk')->once();
+        $connection->expects('bulk');
 
         $batch = $batch->add([$job, $secondJob]);
         $this->assertEquals(2, $batch->pendingJobs);
@@ -401,7 +394,7 @@ class BusBatchTest extends TestCase
 
     public function test_failed_jobs_can_be_recorded_while_allowing_failures()
     {
-        $queue = m::mock(Factory::class);
+        $queue = Mockery::mock(Factory::class);
 
         $batch = $this->createTestBatch($queue, $allowFailures = true);
 
@@ -415,11 +408,12 @@ class BusBatchTest extends TestCase
             use Batchable;
         };
 
-        $queue->shouldReceive('connection')->once()
+        $connection = Mockery::mock(QueueContract::class);
+        $queue->expects('connection')
             ->with('test-connection')
-            ->andReturn($connection = m::mock(stdClass::class));
+            ->andReturn($connection);
 
-        $connection->shouldReceive('bulk')->once();
+        $connection->expects('bulk');
 
         $batch = $batch->add([$job, $secondJob]);
         $this->assertEquals(2, $batch->pendingJobs);
@@ -463,7 +457,7 @@ class BusBatchTest extends TestCase
 
     public function test_failure_callbacks_execute_correctly(): void
     {
-        $queue = m::mock(Factory::class);
+        $queue = Mockery::mock(Factory::class);
 
         $repository = new DatabaseBatchRepository(new BatchFactory($queue), DB::connection(), 'job_batches');
 
@@ -493,11 +487,12 @@ class BusBatchTest extends TestCase
             use Batchable;
         };
 
-        $queue->shouldReceive('connection')->once()
+        $connection = Mockery::mock(QueueContract::class);
+        $queue->expects('connection')
             ->with('test-connection')
-            ->andReturn($connection = m::mock(stdClass::class));
+            ->andReturn($connection);
 
-        $connection->shouldReceive('bulk')->once();
+        $connection->expects('bulk');
 
         $batch = $batch->add([$job]);
 
@@ -520,7 +515,7 @@ class BusBatchTest extends TestCase
 
     public function test_batch_can_be_cancelled()
     {
-        $queue = m::mock(Factory::class);
+        $queue = new QueueFake(Container::getInstance());
 
         $batch = $this->createTestBatch($queue);
 
@@ -533,25 +528,27 @@ class BusBatchTest extends TestCase
 
     public function test_batch_cancelled_event_is_dispatched()
     {
-        Container::getInstance()->instance(EventDispatcher::class, $events = m::mock(EventDispatcher::class));
+        $events = new EventFake(new EventsDispatcher);
+        Container::getInstance()->instance(EventDispatcher::class, $events);
 
-        $queue = m::mock(Factory::class);
+        $queue = new QueueFake(Container::getInstance());
         $batch = $this->createTestBatch($queue);
 
         $exception = new RuntimeException('Something went wrong.');
 
-        $events->shouldReceive('dispatch')->once()->with(m::on(function ($event) use ($batch, $exception) {
-            return $event instanceof BatchCanceled
-                && $event->batch->id === $batch->id
-                && $event->exception === $exception;
-        }));
-
         $batch->cancel($exception);
+
+        $events->assertDispatchedOnce(BatchCanceled::class);
+        $events->assertDispatched(BatchCanceled::class, function ($event) use ($batch, $exception) {
+            return $event->batch->id === $batch->id
+                && $event->batch->cancelled()
+                && $event->exception === $exception;
+        });
     }
 
     public function test_batch_can_be_deleted()
     {
-        $queue = m::mock(Factory::class);
+        $queue = new QueueFake(Container::getInstance());
 
         $batch = $this->createTestBatch($queue);
 
@@ -564,7 +561,7 @@ class BusBatchTest extends TestCase
 
     public function test_batch_state_can_be_inspected()
     {
-        $queue = m::mock(Factory::class);
+        $queue = new QueueFake(Container::getInstance());
 
         $batch = $this->createTestBatch($queue);
 
@@ -604,7 +601,7 @@ class BusBatchTest extends TestCase
 
     public function test_chain_can_be_added_to_batch()
     {
-        $queue = m::mock(Factory::class);
+        $queue = Mockery::mock(Factory::class);
 
         $batch = $this->createTestBatch($queue);
 
@@ -614,11 +611,12 @@ class BusBatchTest extends TestCase
 
         $thirdJob = new ThirdTestJob;
 
-        $queue->shouldReceive('connection')->once()
+        $connection = Mockery::mock(QueueContract::class);
+        $queue->expects('connection')
             ->with('test-connection')
-            ->andReturn($connection = m::mock(stdClass::class));
+            ->andReturn($connection);
 
-        $connection->shouldReceive('bulk')->once()->with(m::on(function ($args) use ($chainHeadJob, $secondJob, $thirdJob) {
+        $connection->expects('bulk')->with(Mockery::on(function ($args) use ($chainHeadJob, $secondJob, $thirdJob) {
             return
                 $args[0] == $chainHeadJob
                 && serialize($secondJob) == $args[0]->chained[0]
@@ -640,7 +638,7 @@ class BusBatchTest extends TestCase
 
     public function test_chained_jobs_in_batch_preserve_their_queue_when_batch_has_no_queue()
     {
-        $queue = m::mock(Factory::class);
+        $queue = Mockery::mock(Factory::class);
 
         $repository = new DatabaseBatchRepository(new BatchFactory($queue), DB::connection(), 'job_batches');
 
@@ -653,11 +651,12 @@ class BusBatchTest extends TestCase
         $firstJob = (new ChainHeadJob)->onQueue('custom-queue');
         $secondJob = (new SecondTestJob)->onQueue('custom-queue');
 
-        $queue->shouldReceive('connection')->once()
+        $connection = Mockery::mock(QueueContract::class);
+        $queue->expects('connection')
             ->with('test-connection')
-            ->andReturn($connection = m::mock(stdClass::class));
+            ->andReturn($connection);
 
-        $connection->shouldReceive('bulk')->once()->with(m::on(function ($args) {
+        $connection->expects('bulk')->with(Mockery::on(function ($args) {
             return true;
         }), '', null);
 
@@ -700,15 +699,15 @@ class BusBatchTest extends TestCase
         $pendingBatch = (new PendingBatch(new Container, collect()))
             ->onQueue('test-queue');
 
-        $connection = m::spy(PostgresConnection::class);
-        $builder = m::spy(Builder::class);
+        $connection = Mockery::spy(PostgresConnection::class);
+        $builder = Mockery::spy(Builder::class);
 
-        $connection->shouldReceive('table')->andReturn($builder);
-        $builder->shouldReceive('useWritePdo')->andReturnSelf();
-        $builder->shouldReceive('where')->andReturnSelf();
+        $connection->expects('table')->times(2)->andReturn($builder);
+        $builder->expects('useWritePdo')->andReturnSelf();
+        $builder->expects('where')->andReturnSelf();
 
         $repository = new DatabaseBatchRepository(
-            new BatchFactory(m::mock(Factory::class)), $connection, 'job_batches'
+            new BatchFactory(Mockery::mock(Factory::class)), $connection, 'job_batches'
         );
 
         $repository->store($pendingBatch);
@@ -724,11 +723,11 @@ class BusBatchTest extends TestCase
     #[DataProvider('serializedOptions')]
     public function test_options_unserialize_on_postgres($serialize, $options)
     {
-        $factory = m::mock(BatchFactory::class);
+        $factory = Mockery::mock(BatchFactory::class);
 
-        $connection = m::spy(PostgresConnection::class);
+        $connection = Mockery::spy(PostgresConnection::class);
 
-        $connection->shouldReceive('table->useWritePdo->where->first')
+        $connection->expects('table->useWritePdo->where->first')
             ->andReturn($m = (object) [
                 'id' => '',
                 'name' => '',
@@ -744,7 +743,7 @@ class BusBatchTest extends TestCase
 
         $batch = (new DatabaseBatchRepository($factory, $connection, 'job_batches'));
 
-        $factory->shouldReceive('make')
+        $factory->expects('make')
             ->withSomeOfArgs($batch, '', '', '', '', '', '', $options);
 
         $batch->find('1');

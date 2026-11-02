@@ -7,6 +7,7 @@ use ArrayIterator;
 use Carbon\CarbonInterval;
 use Countable;
 use Error;
+use Exception;
 use Illuminate\Contracts\Support\Htmlable;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Filesystem\Filesystem;
@@ -18,7 +19,6 @@ use Illuminate\Tests\Support\Fixtures\IntBackedEnum;
 use Illuminate\Tests\Support\Fixtures\StringBackedEnum;
 use IteratorAggregate;
 use LogicException;
-use Mockery as m;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\Attributes\RequiresPhp;
 use PHPUnit\Framework\TestCase;
@@ -36,6 +36,10 @@ class SupportHelpersTest extends TestCase
 
     protected function tearDown(): void
     {
+        unset($_ENV['foo'], $_SERVER['foo'], $_SERVER['required-exists']);
+        SupportLazyClass::$constructorCalled = false;
+        SupportLazyClassWithArrayParameter::$constructorCalled = false;
+
         if (is_dir(__DIR__.'/tmp')) {
             (new Filesystem)->deleteDirectory(__DIR__.'/tmp');
         }
@@ -46,8 +50,17 @@ class SupportHelpersTest extends TestCase
         $str = 'A \'quote\' is <b>bold</b>';
         $this->assertSame('A &#039;quote&#039; is &lt;b&gt;bold&lt;/b&gt;', e($str));
 
-        $html = m::mock(Htmlable::class);
-        $html->shouldReceive('toHtml')->andReturn($str);
+        $html = new class($str) implements Htmlable
+        {
+            public function __construct(protected string $html)
+            {
+            }
+
+            public function toHtml()
+            {
+                return $this->html;
+            }
+        };
         $this->assertEquals($str, e($html));
     }
 
@@ -829,9 +842,8 @@ class SupportHelpersTest extends TestCase
             $object->id = 2;
         })->id);
 
-        $mock = m::mock();
-        $mock->shouldReceive('foo')->once()->andReturn('bar');
-        $this->assertEquals($mock, tap($mock)->foo());
+        $collection = collect();
+        $this->assertSame($collection, tap($collection)->all());
     }
 
     public function testThrow()
@@ -850,42 +862,37 @@ class SupportHelpersTest extends TestCase
 
     public function testThrowExceptionWithMessage()
     {
-        $this->expectException(RuntimeException::class);
-        $this->expectExceptionMessage('test');
+        $this->expectExceptionObject(new RuntimeException('test'));
 
         throw_if(true, 'test');
     }
 
     public function testThrowExceptionAsStringWithMessage()
     {
-        $this->expectException(LogicException::class);
-        $this->expectExceptionMessage('test');
+        $this->expectExceptionObject(new LogicException('test'));
 
         throw_if(true, LogicException::class, 'test');
     }
 
     public function testThrowClosureException()
     {
-        $this->expectException(\Exception::class);
-        $this->expectExceptionMessage('test');
+        $this->expectExceptionObject(new Exception('test'));
 
-        throw_if(true, fn () => new \Exception('test'));
+        throw_if(true, fn () => new Exception('test'));
     }
 
     public function testThrowClosureWithParamsException()
     {
-        $this->expectException(\Exception::class);
-        $this->expectExceptionMessage('test');
+        $this->expectExceptionObject(new Exception('test'));
 
-        throw_if(true, fn (string $message) => new \Exception($message), 'test');
+        throw_if(true, fn (string $message) => new Exception($message), 'test');
     }
 
     public function testThrowClosureStringWithParamsException()
     {
-        $this->expectException(\Exception::class);
-        $this->expectExceptionMessage('test');
+        $this->expectExceptionObject(new Exception('test'));
 
-        throw_if(true, fn () => \Exception::class, 'test');
+        throw_if(true, fn () => Exception::class, 'test');
     }
 
     public function testThrowUnless()
@@ -904,16 +911,14 @@ class SupportHelpersTest extends TestCase
 
     public function testThrowUnlessExceptionWithMessage()
     {
-        $this->expectException(RuntimeException::class);
-        $this->expectExceptionMessage('test');
+        $this->expectExceptionObject(new RuntimeException('test'));
 
         throw_unless(false, 'test');
     }
 
     public function testThrowUnlessExceptionAsStringWithMessage()
     {
-        $this->expectException(LogicException::class);
-        $this->expectExceptionMessage('test');
+        $this->expectExceptionObject(new LogicException('test'));
 
         throw_unless(false, LogicException::class, 'test');
     }
@@ -925,8 +930,7 @@ class SupportHelpersTest extends TestCase
 
     public function testThrowWithString()
     {
-        $this->expectException(RuntimeException::class);
-        $this->expectExceptionMessage('Test Message');
+        $this->expectExceptionObject(new RuntimeException('Test Message'));
 
         throw_if(true, RuntimeException::class, 'Test Message');
     }
@@ -1834,8 +1838,7 @@ class SupportHelpersTest extends TestCase
     #[RequiresPhp('>= 8.4.0')]
     public function testClosureOnlyLazyThrowsWhenNotClassSpecifiedInClosure(): void
     {
-        $this->expectException(RuntimeException::class);
-        $this->expectExceptionMessage('The first parameter of the given Closure is missing a type hint.');
+        $this->expectExceptionObject(new RuntimeException('The first parameter of the given Closure is missing a type hint.'));
 
         lazy(function ($instance) {
             //
@@ -2114,8 +2117,7 @@ class SupportHelpersTest extends TestCase
     #[RequiresPhp('>= 8.4.0')]
     public function testClosureOnlyProxyThrowsWhenNotClassSpecifiedInClosure(): void
     {
-        $this->expectException(RuntimeException::class);
-        $this->expectExceptionMessage('The first parameter of the given Closure is missing a type hint.');
+        $this->expectExceptionObject(new RuntimeException('The first parameter of the given Closure is missing a type hint.'));
 
         proxy(function ($proxy) {
             //

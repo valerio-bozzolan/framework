@@ -2,6 +2,8 @@
 
 namespace Illuminate\Tests\Validation;
 
+use Illuminate\Tests\Validation\Fixtures\ArrayKeys;
+use Illuminate\Tests\Validation\Fixtures\ArrayKeysBacked;
 use Illuminate\Translation\ArrayLoader;
 use Illuminate\Translation\Translator;
 use Illuminate\Validation\Rule;
@@ -9,7 +11,7 @@ use Illuminate\Validation\Validator;
 use InvalidArgumentException;
 use PHPUnit\Framework\TestCase;
 
-include_once 'Enums.php';
+include_once 'Fixtures/Enums.php';
 
 class ValidationArrayKeysRuleTest extends TestCase
 {
@@ -84,8 +86,7 @@ class ValidationArrayKeysRuleTest extends TestCase
 
         $v = new Validator($trans, ['foo' => ['key_1' => 'bar']], ['foo' => 'array_keys']);
 
-        $this->expectException(InvalidArgumentException::class);
-        $this->expectExceptionMessage('Validation rule array_keys requires at least 1 parameters.');
+        $this->expectExceptionObject(new InvalidArgumentException('Validation rule array_keys requires at least 1 parameters.'));
 
         $v->passes();
     }

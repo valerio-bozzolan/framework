@@ -11,9 +11,25 @@ use Illuminate\Container\EntryNotFoundException;
 use Illuminate\Contracts\Container\BindingResolutionException;
 use Illuminate\Contracts\Container\ContextualAttribute;
 use Illuminate\Contracts\Container\SelfBuilding;
+use Illuminate\Tests\Container\Fixtures\BindBeforeBindWhenInterface;
+use Illuminate\Tests\Container\Fixtures\BindBeforeConcrete;
+use Illuminate\Tests\Container\Fixtures\BindFallbackConcrete;
+use Illuminate\Tests\Container\Fixtures\BindWhenAndBindInterface;
+use Illuminate\Tests\Container\Fixtures\BindWhenCondition;
+use Illuminate\Tests\Container\Fixtures\BindWhenConditionalConcrete;
+use Illuminate\Tests\Container\Fixtures\BindWhenConditionalInterface;
+use Illuminate\Tests\Container\Fixtures\BindWhenFallbackInterface;
+use Illuminate\Tests\Container\Fixtures\BindWhenInterface;
+use Illuminate\Tests\Container\Fixtures\BindWhenNoMatchInterface;
+use Illuminate\Tests\Container\Fixtures\BindWhenSingletonConcrete;
+use Illuminate\Tests\Container\Fixtures\BindWhenSingletonInterface;
+use Illuminate\Tests\Container\Fixtures\BindWhenTrueConcrete;
+use Illuminate\Tests\Container\Fixtures\BindWhenWinsConcrete;
+use LogicException;
 use PHPUnit\Framework\Attributes\RequiresPhp;
 use PHPUnit\Framework\TestCase;
 use Psr\Container\ContainerExceptionInterface;
+use ReflectionProperty;
 use stdClass;
 use TypeError;
 
@@ -152,7 +168,13 @@ class ContainerTest extends TestCase
     {
         $container = new Container;
         $container->scoped(fn (): stdClass => new stdClass);
+
+        $first = $container->make(stdClass::class);
+        $this->assertSame($first, $container->make(stdClass::class));
+
         $container->forgetScopedInstances();
+
+        $this->assertNotSame($first, $container->make(stdClass::class));
     }
 
     public function testScopedIf()
@@ -167,6 +189,42 @@ class ContainerTest extends TestCase
         });
         $this->assertSame('foo', $container->make('class'));
         $this->assertNotSame('bar', $container->make('class'));
+    }
+
+    public function testScopedDoesNotRegisterDuplicateScopedInstances()
+    {
+        $container = new Container;
+        $container->scoped('class', function () {
+            return new stdClass;
+        });
+        $container->scoped('class', function () {
+            return new stdClass;
+        });
+
+        $this->assertSame(['class'], (new ReflectionProperty($container, 'scopedInstances'))->getValue($container));
+    }
+
+    public function testScopedIfDoesNotRegisterDuplicateScopedInstancesWhenRebound()
+    {
+        $container = new Container;
+        $container->scopedIf('class', function () {
+            return new stdClass;
+        });
+
+        unset($container['class']);
+
+        $container->scopedIf('class', function () {
+            return new stdClass;
+        });
+
+        $this->assertSame(['class'], (new ReflectionProperty($container, 'scopedInstances'))->getValue($container));
+
+        $container->forgetScopedInstances();
+
+        $firstInstantiation = $container->make('class');
+        $container->forgetScopedInstances();
+
+        $this->assertNotSame($firstInstantiation, $container->make('class'));
     }
 
     public function testScopedClosureResets()
@@ -438,8 +496,7 @@ class ContainerTest extends TestCase
 
     public function testInternalClassWithDefaultParameters()
     {
-        $this->expectException(BindingResolutionException::class);
-        $this->expectExceptionMessage('Unresolvable dependency resolving [Parameter #0 [ <required> $first ]] in class Illuminate\Tests\Container\ContainerMixedPrimitiveStub');
+        $this->expectExceptionObject(new BindingResolutionException('Unresolvable dependency resolving [Parameter #0 [ <required> $first ]] in class Illuminate\Tests\Container\ContainerMixedPrimitiveStub'));
 
         $container = new Container;
         $container->make(ContainerMixedPrimitiveStub::class, []);
@@ -447,8 +504,7 @@ class ContainerTest extends TestCase
 
     public function testBindingResolutionExceptionMessage()
     {
-        $this->expectException(BindingResolutionException::class);
-        $this->expectExceptionMessage('Target [Illuminate\Tests\Container\IContainerContractStub] is not instantiable.');
+        $this->expectExceptionObject(new BindingResolutionException('Target [Illuminate\Tests\Container\IContainerContractStub] is not instantiable.'));
 
         $container = new Container;
         $container->make(IContainerContractStub::class, []);
@@ -456,8 +512,7 @@ class ContainerTest extends TestCase
 
     public function testBindingResolutionExceptionMessageIncludesBuildStack()
     {
-        $this->expectException(BindingResolutionException::class);
-        $this->expectExceptionMessage('Target [Illuminate\Tests\Container\IContainerContractStub] is not instantiable while building [Illuminate\Tests\Container\ContainerDependentStub].');
+        $this->expectExceptionObject(new BindingResolutionException('Target [Illuminate\Tests\Container\IContainerContractStub] is not instantiable while building [Illuminate\Tests\Container\ContainerDependentStub].'));
 
         $container = new Container;
         $container->make(ContainerDependentStub::class, []);
@@ -465,8 +520,7 @@ class ContainerTest extends TestCase
 
     public function testBindingResolutionExceptionMessageWhenClassDoesNotExist()
     {
-        $this->expectException(BindingResolutionException::class);
-        $this->expectExceptionMessage('Target class [Foo\Bar\Baz\DummyClass] does not exist.');
+        $this->expectExceptionObject(new BindingResolutionException('Target class [Foo\Bar\Baz\DummyClass] does not exist.'));
 
         $container = new Container;
         $container->build('Foo\Bar\Baz\DummyClass');
@@ -574,8 +628,7 @@ class ContainerTest extends TestCase
 
     public function testItThrowsExceptionWhenAbstractIsSameAsAlias()
     {
-        $this->expectException('LogicException');
-        $this->expectExceptionMessage('[name] is aliased to itself.');
+        $this->expectExceptionObject(new LogicException('[name] is aliased to itself.'));
 
         $container = new Container;
         $container->alias('name', 'name');
@@ -583,7 +636,7 @@ class ContainerTest extends TestCase
 
     public function testItThrowsExceptionOnCircularAliasReference(): void
     {
-        $this->expectExceptionObject(new \LogicException('Circular alias reference for [a].'));
+        $this->expectExceptionObject(new LogicException('Circular alias reference for [a].'));
 
         $container = new Container;
         $container->alias('a', 'b');
@@ -594,7 +647,7 @@ class ContainerTest extends TestCase
 
     public function testItThrowsExceptionOnIndirectCircularAliasReference(): void
     {
-        $this->expectExceptionObject(new \LogicException('Circular alias reference for [a].'));
+        $this->expectExceptionObject(new LogicException('Circular alias reference for [a].'));
 
         $container = new Container;
         $container->alias('a', 'b');

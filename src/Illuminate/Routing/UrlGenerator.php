@@ -37,21 +37,21 @@ class UrlGenerator implements UrlGeneratorContract
     /**
      * The asset root URL.
      *
-     * @var string
+     * @var string|null
      */
     protected $assetRoot;
 
     /**
      * The forced URL root.
      *
-     * @var string
+     * @var string|null
      */
     protected $forcedRoot;
 
     /**
      * The forced scheme for URLs.
      *
-     * @var string
+     * @var string|null
      */
     protected $forceScheme;
 
@@ -469,7 +469,7 @@ class UrlGenerator implements UrlGeneratorContract
             ? rtrim($request->getSchemeAndHttpHost().$request->getBaseUrl().$request->getPathInfo(), '/')
             : '/'.$request->path();
 
-        $queryString = (new Stringable((string) $request->server->get('QUERY_STRING')))->explode('&')
+        $queryString = (new Stringable((string) ($request->server->get('VAPOR_RAW_QUERY_STRING') ?? $request->server->get('QUERY_STRING'))))->explode('&')
             ->reject(function ($parameter) use ($ignoreQuery) {
                 $parameter = Str::before($parameter, '=');
 

@@ -8,11 +8,14 @@ use Illuminate\Concurrency\SyncDriver;
 use Illuminate\Foundation\Application;
 use Illuminate\Process\Factory as ProcessFactory;
 use Illuminate\Support\Facades\Concurrency;
+use Illuminate\Support\Facades\Context;
+use Orchestra\Testbench\Attributes\WithEnv;
 use Orchestra\Testbench\TestCase;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\Attributes\RequiresOperatingSystem;
 
 #[RequiresOperatingSystem('Linux|Darwin')]
+#[WithEnv('APP_KEY', 'AckfSECXIvnK5r28GVIWUAxmbBSjTsmF')]
 class ConcurrencyTest extends TestCase
 {
     protected function setUp(): void
@@ -119,8 +122,7 @@ PHP);
 
     public function testRunHandlerProcessErrorWithDefaultExceptionWithoutParam()
     {
-        $this->expectException(Exception::class);
-        $this->expectExceptionMessage('This is a different exception');
+        $this->expectExceptionObject(new Exception('This is a different exception'));
 
         Concurrency::run([
             fn () => throw new Exception(
@@ -131,8 +133,7 @@ PHP);
 
     public function testRunHandlerProcessErrorWithCustomExceptionWithoutParam()
     {
-        $this->expectException(ExceptionWithoutParam::class);
-        $this->expectExceptionMessage('Test');
+        $this->expectExceptionObject(new ExceptionWithoutParam('Test'));
         Concurrency::run([
             fn () => throw new ExceptionWithoutParam('Test'),
         ]);
@@ -175,6 +176,34 @@ PHP);
             'false' => [false],
             'empty string' => [''],
         ];
+    }
+
+    public function testContextIsPropagatedToConcurrentProcesses()
+    {
+        Context::add('task', 'concurrency');
+        Context::addHidden('token', 'secret');
+
+        [$task, $token] = Concurrency::driver('process')->run([
+            fn () => Context::get('task'),
+            fn () => Context::getHidden('token'),
+        ]);
+
+        $this->assertSame('concurrency', $task);
+        $this->assertSame('secret', $token);
+    }
+
+    public function testContextIsPropagatedToDeferredConcurrentProcesses()
+    {
+        $this->withoutDefer();
+
+        Context::add('task', 'concurrency');
+
+        $factory = $this->app->make(ProcessFactory::class);
+        $factory->fake();
+
+        (new ProcessDriver($factory))->defer([fn () => 'result']);
+
+        $factory->assertRan(fn ($process) => ($process->environment['__LARAVEL_CONTEXT'] ?? null) === json_encode(Context::dehydrate()));
     }
 
     public static function getConcurrencyDrivers(): array

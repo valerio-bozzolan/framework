@@ -5,17 +5,22 @@ namespace Illuminate\Tests\Routing;
 use Illuminate\Contracts\Routing\UrlRoutable;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Http\Request;
+use Illuminate\Routing\EncodedParameter;
 use Illuminate\Routing\Exceptions\UrlGenerationException;
 use Illuminate\Routing\Route;
 use Illuminate\Routing\RouteCollection;
 use Illuminate\Routing\UrlGenerator;
+use Illuminate\Tests\Routing\Fixtures\CategoryBackedEnum;
+use Illuminate\Tests\Routing\Fixtures\CategoryEnum;
+use Illuminate\Tests\Routing\Fixtures\RouteDomainEnum;
+use Illuminate\Tests\Routing\Fixtures\RouteNameEnum;
 use InvalidArgumentException;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\HttpFoundation\Request as SymfonyRequest;
 use Symfony\Component\Routing\Exception\RouteNotFoundException;
 
-include_once 'Enums.php';
+include_once 'Fixtures/Enums.php';
 
 class RoutingUrlGeneratorTest extends TestCase
 {
@@ -617,8 +622,7 @@ class RoutingUrlGeneratorTest extends TestCase
     #[DataProvider('provideParametersAndExpectedMeaningfulExceptionMessages')]
     public function testUrlGenerationThrowsExceptionForMissingParametersWithMeaningfulMessage($parameters, $expectedMeaningfulExceptionMessage)
     {
-        $this->expectException(UrlGenerationException::class);
-        $this->expectExceptionMessage($expectedMeaningfulExceptionMessage);
+        $this->expectExceptionObject(new UrlGenerationException($expectedMeaningfulExceptionMessage));
 
         $url = new UrlGenerator(
             $routes = new RouteCollection,
@@ -763,8 +767,7 @@ class RoutingUrlGeneratorTest extends TestCase
 
     public function testRouteNotDefinedException()
     {
-        $this->expectException(RouteNotFoundException::class);
-        $this->expectExceptionMessage('Route [not_exists_route] not defined.');
+        $this->expectExceptionObject(new RouteNotFoundException('Route [not_exists_route] not defined.'));
 
         $url = new UrlGenerator(
             new RouteCollection,
@@ -772,6 +775,49 @@ class RoutingUrlGeneratorTest extends TestCase
         );
 
         $url->route('not_exists_route');
+    }
+
+    public function testRouteParametersContainingPercentSignsAreEncoded()
+    {
+        $url = new UrlGenerator(
+            $routes = new RouteCollection,
+            $request = Request::create('http://www.foo.com/')
+        );
+
+        $routes->add(new Route(['GET'], 'foo/{bar}', ['as' => 'foo', function () {
+            //
+        }]));
+
+        // A raw percent sign would be decoded again when the router matches the URL,
+        // so the parameter has to survive a round trip through rawurldecode()...
+        $this->assertSame('http://www.foo.com/foo/%2566oo', $url->route('foo', ['bar' => '%66oo']));
+        $this->assertSame('http://www.foo.com/foo/100%25', $url->route('foo', ['bar' => '100%']));
+
+        $this->assertSame('%66oo', rawurldecode('%2566oo'));
+        $this->assertSame('100%', rawurldecode('100%25'));
+
+        // Values without a percent sign are unaffected...
+        $this->assertSame('http://www.foo.com/foo/bar', $url->route('foo', ['bar' => 'bar']));
+        $this->assertSame('http://www.foo.com/foo/1', $url->route('foo', ['bar' => 1]));
+    }
+
+    public function testEncodedRouteParametersAreNotEncodedAgain()
+    {
+        $url = new UrlGenerator(
+            $routes = new RouteCollection,
+            $request = Request::create('http://www.foo.com/')
+        );
+
+        $routes->add(new Route(['GET'], 'foo/{bar}', ['as' => 'foo', function () {
+            //
+        }]));
+
+        // Values that are already URL encoded may be marked as such so they are used as-is...
+        $this->assertSame('http://www.foo.com/foo/foo%20bar', $url->route('foo', ['bar' => new EncodedParameter('foo%20bar')]));
+        $this->assertSame('http://www.foo.com/foo/%66oo', $url->route('foo', ['bar' => new EncodedParameter('%66oo')]));
+
+        // While plain strings continue to be encoded...
+        $this->assertSame('http://www.foo.com/foo/foo%2520bar', $url->route('foo', ['bar' => 'foo%20bar']));
     }
 
     public function testSignedUrl()
@@ -897,8 +943,7 @@ class RoutingUrlGeneratorTest extends TestCase
         }]);
         $routes->add($route);
 
-        $this->expectException(InvalidArgumentException::class);
-        $this->expectExceptionMessage('reserved');
+        $this->expectExceptionObject(new InvalidArgumentException('reserved'));
 
         Request::create($url->signedRoute('foo', ['signature' => 'bar']));
     }
@@ -918,8 +963,7 @@ class RoutingUrlGeneratorTest extends TestCase
         }]);
         $routes->add($route);
 
-        $this->expectException(InvalidArgumentException::class);
-        $this->expectExceptionMessage('reserved');
+        $this->expectExceptionObject(new InvalidArgumentException('reserved'));
 
         Request::create($url->signedRoute('foo', ['expires' => 253402300799]));
     }

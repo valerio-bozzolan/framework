@@ -1,6 +1,6 @@
 <?php
 
-namespace Tests\Unit\Rules;
+namespace Illuminate\Tests\Validation;
 
 use Illuminate\Support\Carbon;
 use Illuminate\Translation\ArrayLoader;
@@ -25,6 +25,18 @@ class ValidationDateRuleTest extends TestCase
     {
         $rule = Rule::date()->format('d/m/Y');
         $this->assertSame('date_format:d/m/Y', (string) $rule);
+    }
+
+    /**
+     * Test the date equality constraint.
+     */
+    public function testDateEqualsRule()
+    {
+        $rule = Rule::date()->equals('2024-01-01');
+        $this->assertSame('date|date_equals:2024-01-01', (string) $rule);
+
+        $rule = Rule::date()->format('d/m/Y')->equals(Carbon::parse('2024-01-01'));
+        $this->assertSame('date_format:d/m/Y|date_equals:01/01/2024', (string) $rule);
     }
 
     public function testAfterTodayRule()

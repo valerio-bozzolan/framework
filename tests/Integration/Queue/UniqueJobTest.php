@@ -10,15 +10,22 @@ use Illuminate\Contracts\Cache\Repository as Cache;
 use Illuminate\Contracts\Queue\ShouldBeUnique;
 use Illuminate\Contracts\Queue\ShouldBeUniqueUntilProcessing;
 use Illuminate\Contracts\Queue\ShouldQueue;
+use Illuminate\Contracts\Queue\ShouldQueueAfterCommit;
 use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Foundation\Auth\User;
 use Illuminate\Foundation\Bus\Dispatchable;
+use Illuminate\Queue\Connectors\ConnectorInterface;
+use Illuminate\Queue\Events\UniqueJobSkipped;
 use Illuminate\Queue\InteractsWithQueue;
+use Illuminate\Queue\NullQueue;
 use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\Bus;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Queue;
 use Orchestra\Testbench\Attributes\WithMigration;
 use Orchestra\Testbench\Factories\UserFactory;
+use RuntimeException;
 
 #[WithMigration]
 #[WithMigration('cache')]
@@ -52,6 +59,26 @@ class UniqueJobTest extends QueueTestCase
         $this->assertFalse(
             $this->app->get(Cache::class)->lock($this->getLockKey(UniqueTestJob::class), 10)->get()
         );
+    }
+
+    public function testUniqueJobEmitsUniqueJobSkippedEventWhenAlreadyAcquired()
+    {
+        Bus::fake();
+
+        $skipped = [];
+
+        Event::listen(UniqueJobSkipped::class, function ($event) use (&$skipped) {
+            $skipped[] = $event->job;
+        });
+
+        UniqueTestJob::dispatch();
+
+        $this->assertSame([], $skipped);
+
+        UniqueTestJob::dispatch();
+
+        $this->assertCount(1, $skipped);
+        $this->assertInstanceOf(UniqueTestJob::class, $skipped[0]);
     }
 
     public function testUniqueJobWithViaDispatched()
@@ -240,6 +267,60 @@ class UniqueJobTest extends QueueTestCase
         Queue::assertPushed(UniqueTestJob::class);
     }
 
+    public function testQueueFakeForReleasesUniqueJobLocks()
+    {
+        Queue::fakeFor(function () {
+            UniqueTestJob::dispatch();
+            Queue::assertPushed(UniqueTestJob::class);
+        });
+
+        $this->assertTrue(
+            $this->app->get(Cache::class)->lock($this->getLockKey(UniqueTestJob::class), 10)->get()
+        );
+    }
+
+    public function testQueueFakeReleasesUniqueListenerLocksBetweenFakes()
+    {
+        Event::listen(UniqueTestEvent::class, UniqueTestListener::class);
+
+        Queue::fake();
+
+        event(new UniqueTestEvent);
+        $this->assertCount(1, Queue::listenersPushed(UniqueTestListener::class));
+
+        Queue::fake();
+
+        event(new UniqueTestEvent);
+        $this->assertCount(1, Queue::listenersPushed(UniqueTestListener::class));
+    }
+
+    public function testQueueFakeForReleasesUniqueListenerLocks()
+    {
+        Event::listen(UniqueTestEvent::class, UniqueTestListener::class);
+
+        Queue::fakeFor(function () {
+            event(new UniqueTestEvent);
+            $this->assertCount(1, Queue::listenersPushed(UniqueTestListener::class));
+        });
+
+        Queue::fake();
+
+        event(new UniqueTestEvent);
+        $this->assertCount(1, Queue::listenersPushed(UniqueTestListener::class));
+    }
+
+    public function testQueueFakeExceptForReleasesUniqueJobLocks()
+    {
+        Queue::fakeExceptFor(function () {
+            UniqueTestJob::dispatch();
+            Queue::assertPushed(UniqueTestJob::class);
+        });
+
+        $this->assertTrue(
+            $this->app->get(Cache::class)->lock($this->getLockKey(UniqueTestJob::class), 10)->get()
+        );
+    }
+
     public function testQueueFakePreservesUniqueJobLockWithinTest()
     {
         Queue::fake();
@@ -248,6 +329,112 @@ class UniqueJobTest extends QueueTestCase
         UniqueTestJob::dispatch();
 
         Queue::assertPushedTimes(UniqueTestJob::class, 1);
+    }
+
+    public function testRolledBackPushDoesNotReleaseAnotherDispatchesUniqueLock()
+    {
+        $this->markTestSkippedWhenUsingSyncQueueDriver();
+
+        dispatch($job = new UniqueTestAfterCommitJob);
+
+        $this->assertFalse($this->app->get(Cache::class)->lock($this->getLockKey($job), 10)->get());
+
+        try {
+            DB::transaction(function () {
+                Queue::push(new UniqueTestAfterCommitJob);
+
+                throw new Exception('Rollback.');
+            });
+        } catch (Exception) {
+            //
+        }
+
+        $this->assertFalse($this->app->get(Cache::class)->lock($this->getLockKey($job), 10)->get());
+    }
+
+    public function testRolledBackQueuedListenerReleasesItsUniqueLock()
+    {
+        $this->markTestSkippedWhenUsingSyncQueueDriver();
+
+        $this->app['config']->set('cache.default', 'array');
+
+        Event::listen(UniqueTestEvent::class, UniqueTestAfterCommitListener::class);
+
+        $size = Queue::size();
+
+        try {
+            DB::transaction(function () {
+                event(new UniqueTestEvent);
+
+                throw new Exception('Rollback.');
+            });
+        } catch (Exception) {
+            //
+        }
+
+        event(new UniqueTestEvent);
+
+        $this->assertSame($size + 1, Queue::size());
+    }
+
+    public function testLockIsReleasedWhenPushingToTheQueueFails()
+    {
+        Queue::extend('failing', fn () => new class implements ConnectorInterface
+        {
+            public function connect(array $config)
+            {
+                return new class extends NullQueue
+                {
+                    public function push($job, $data = '', $queue = null)
+                    {
+                        throw new RuntimeException('Queue unavailable.');
+                    }
+                };
+            }
+        });
+
+        $this->app['config']->set('queue.connections.failing', ['driver' => 'failing']);
+
+        try {
+            dispatch(new UniqueTestJob)->onConnection('failing');
+        } catch (RuntimeException) {
+            //
+        }
+
+        $this->assertTrue($this->app->get(Cache::class)->lock($this->getLockKey(UniqueTestJob::class), 10)->get());
+    }
+
+    public function testListenerLockIsReleasedWhenPushingToTheQueueFails()
+    {
+        Queue::extend('failing', fn () => new class implements ConnectorInterface
+        {
+            public function connect(array $config)
+            {
+                return new class extends NullQueue
+                {
+                    public function push($job, $data = '', $queue = null)
+                    {
+                        throw new RuntimeException('Queue unavailable.');
+                    }
+                };
+            }
+        });
+
+        $this->app['config']->set('queue.connections.failing', ['driver' => 'failing']);
+
+        Event::listen(UniqueTestEvent::class, UniqueTestFailingPushListener::class);
+
+        try {
+            event(new UniqueTestEvent);
+
+            $this->fail('Expected pushing the listener to fail.');
+        } catch (RuntimeException $e) {
+            $this->assertSame('Queue unavailable.', $e->getMessage());
+        }
+
+        $lockKey = 'laravel_unique_job:'.hash('xxh128', UniqueTestFailingPushListener::class).':';
+
+        $this->assertTrue($this->app->get(Cache::class)->lock($lockKey, 10)->get());
     }
 
     protected function getLockKey($job)
@@ -439,5 +626,56 @@ class UniqueIdTestJobWithDisplayName extends UniqueTestJob
     public function displayName(): string
     {
         return 'App\\Actions\\UniqueTestAction';
+    }
+}
+
+class UniqueTestAfterCommitJob implements ShouldQueue, ShouldBeUnique
+{
+    use Dispatchable, InteractsWithQueue, Queueable;
+
+    public function __construct()
+    {
+        $this->afterCommit = true;
+    }
+
+    public function handle()
+    {
+        //
+    }
+}
+
+class UniqueTestEvent
+{
+    //
+}
+
+class UniqueTestListener implements ShouldQueue, ShouldBeUnique
+{
+    public function uniqueId(): string
+    {
+        return 'unique-id-1';
+    }
+
+    public function handle(UniqueTestEvent $event)
+    {
+        //
+    }
+}
+
+class UniqueTestAfterCommitListener implements ShouldQueueAfterCommit, ShouldBeUnique
+{
+    public function handle(UniqueTestEvent $event)
+    {
+        //
+    }
+}
+
+class UniqueTestFailingPushListener implements ShouldQueue, ShouldBeUnique
+{
+    public $connection = 'failing';
+
+    public function handle(UniqueTestEvent $event)
+    {
+        //
     }
 }

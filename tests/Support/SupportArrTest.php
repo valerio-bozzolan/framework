@@ -8,18 +8,29 @@ use Illuminate\Support\Arr;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Collection;
 use Illuminate\Support\ItemNotFoundException;
+use Illuminate\Support\LazyCollection;
 use Illuminate\Support\MultipleItemsFoundException;
+use Illuminate\Tests\Support\Fixtures\TestArrayableObject;
+use Illuminate\Tests\Support\Fixtures\TestBackedEnum;
+use Illuminate\Tests\Support\Fixtures\TestEnum;
+use Illuminate\Tests\Support\Fixtures\TestJsonableObject;
+use Illuminate\Tests\Support\Fixtures\TestJsonSerializeObject;
+use Illuminate\Tests\Support\Fixtures\TestJsonSerializeWithScalarValueObject;
+use Illuminate\Tests\Support\Fixtures\TestStringBackedEnum;
+use Illuminate\Tests\Support\Fixtures\TestTraversableAndJsonSerializableObject;
 use InvalidArgumentException;
 use PHPUnit\Framework\Attributes\IgnoreDeprecations;
 use PHPUnit\Framework\TestCase;
 use stdClass;
 use WeakMap;
 
-include_once 'Common.php';
-include_once 'Enums.php';
+include_once 'Fixtures/Common.php';
+include_once 'Fixtures/Enums.php';
 
 class SupportArrTest extends TestCase
 {
+    use Concerns\CountsEnumerations;
+
     public function testAccessible(): void
     {
         $this->assertTrue(Arr::accessible([]));
@@ -90,8 +101,7 @@ class SupportArrTest extends TestCase
         Arr::push($array, null, 'Taylor');
         $this->assertEquals(['Chris', 'Nuno', 'Taylor'], $array);
 
-        $this->expectException(InvalidArgumentException::class);
-        $this->expectExceptionMessage('Array value for key [foo.bar] must be an array, boolean found.');
+        $this->expectExceptionObject(new InvalidArgumentException('Array value for key [foo.bar] must be an array, boolean found.'));
 
         $array = ['foo' => ['bar' => false]];
         Arr::push($array, 'foo.bar', 'baz');
@@ -119,6 +129,10 @@ class SupportArrTest extends TestCase
         $collection = collect(['baz', 'boom']);
         $mixedArray = [[1], [2], [3], ['foo', 'bar'], $collection];
         $this->assertEquals([1, 2, 3, 'foo', 'bar', 'baz', 'boom'], Arr::collapse($mixedArray));
+
+        // Case including lazy collections
+        $mixedArray = [[1], new LazyCollection([2, 3]), collect([4])];
+        $this->assertEquals([1, 2, 3, 4], Arr::collapse($mixedArray));
     }
 
     public function testCrossJoin()
@@ -451,6 +465,23 @@ class SupportArrTest extends TestCase
         $this->assertSame(0, $result);
     }
 
+    public function testFirstIsLazy()
+    {
+        $this->assertEnumerates(2, function ($collection) {
+            Arr::first($collection, fn ($value) => $value === 2);
+        });
+    }
+
+    public function testFirstWorksWithYieldFrom()
+    {
+        $products = (function () {
+            yield from ['Laptop', 'Monitor'];
+            yield from ['Keyboard', 'Mouse'];
+        })();
+
+        $this->assertSame('Laptop', Arr::first($products, fn ($product) => $product === 'Laptop'));
+    }
+
     public function testJoin()
     {
         $this->assertSame('a, b, c', Arr::join(['a', 'b', 'c'], ', '));
@@ -551,6 +582,12 @@ class SupportArrTest extends TestCase
         // Nested arrays containing arrays containing arrays are flattened
         $array = [['#foo', new Collection(['#bar', ['#zap']])], ['#baz']];
         $this->assertEquals(['#foo', '#bar', '#zap', '#baz'], Arr::flatten($array));
+    }
+
+    public function testFlattenWithLazyCollections()
+    {
+        $array = [new LazyCollection(['#foo', ['#bar']]), ['#baz', new LazyCollection(['#zap'])]];
+        $this->assertEquals(['#foo', '#bar', '#baz', '#zap'], Arr::flatten($array));
     }
 
     public function testFlattenWithDepth()
@@ -1755,8 +1792,7 @@ class SupportArrTest extends TestCase
         }] = 'bar';
         $this->assertSame(['bar'], Arr::from($items));
 
-        $this->expectException(InvalidArgumentException::class);
-        $this->expectExceptionMessage('Items cannot be represented by a scalar value.');
+        $this->expectExceptionObject(new InvalidArgumentException('Items cannot be represented by a scalar value.'));
         Arr::from(123);
     }
 

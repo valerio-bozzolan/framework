@@ -4,16 +4,22 @@ declare(strict_types=1);
 
 namespace Illuminate\Tests\Console\Scheduling;
 
+use Illuminate\Console\Events\ScheduledTaskFailed;
+use Illuminate\Console\Events\ScheduledTaskFinished;
 use Illuminate\Console\Scheduling\EventMutex;
 use Illuminate\Console\Scheduling\Schedule;
 use Illuminate\Console\Scheduling\SchedulingMutex;
 use Illuminate\Container\Container;
+use Illuminate\Contracts\Events\Dispatcher as DispatcherContract;
 use Illuminate\Contracts\Queue\ShouldQueue;
-use Illuminate\Tests\Console\Fixtures\JobToTestWithSchedule;
-use Mockery as m;
+use Illuminate\Events\Dispatcher;
+use Illuminate\Tests\Console\Fixtures\FakeEventMutex;
+use Illuminate\Tests\Queue\Fixtures\JobToTestWithSchedule;
+use Mockery;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
+use RuntimeException;
 
 #[CoversClass(Schedule::class)]
 final class ScheduleTest extends TestCase
@@ -24,9 +30,8 @@ final class ScheduleTest extends TestCase
     {
         $this->container = new Container;
         Container::setInstance($this->container);
-        $eventMutex = m::mock(EventMutex::class);
-        $this->container->instance(EventMutex::class, $eventMutex);
-        $schedulingMutex = m::mock(SchedulingMutex::class);
+        $this->container->instance(EventMutex::class, new FakeEventMutex);
+        $schedulingMutex = Mockery::mock(SchedulingMutex::class);
         $this->container->instance(SchedulingMutex::class, $schedulingMutex);
     }
 
@@ -113,5 +118,81 @@ final class ScheduleTest extends TestCase
 
         $this->assertSame(['team' => 'platform'], $events[0]->attributes);
         $this->assertSame([], $events[1]->attributes);
+    }
+
+    public function testEventsDoNotRunOnOneServerByDefault(): void
+    {
+        $schedule = new Schedule();
+
+        $schedule->command('inspire')->everyMinute();
+
+        $this->assertFalse($schedule->events()[0]->onOneServer);
+    }
+
+    public function testEveryEventMayRunOnOneServer(): void
+    {
+        Schedule::alwaysOnOneServer();
+
+        try {
+            $schedule = new Schedule();
+
+            $schedule->command('inspire')->everyMinute();
+            $schedule->job(JobToTestWithSchedule::class)->daily();
+            $schedule->call(fn () => null)->name('prune')->hourly();
+            $schedule->call(fn () => null)->hourly();
+
+            [$command, $job, $closure, $unnamedClosure] = $schedule->events();
+
+            $this->assertTrue($command->onOneServer);
+            $this->assertTrue($job->onOneServer);
+            $this->assertTrue($closure->onOneServer);
+            $this->assertFalse($unnamedClosure->onOneServer);
+        } finally {
+            Schedule::alwaysOnOneServer(false);
+        }
+    }
+
+    public function testWhenTaskRunsLongerThan(): void
+    {
+        $this->container->instance(DispatcherContract::class, $events = new Dispatcher($this->container));
+
+        $schedule = new Schedule();
+        $task = $schedule->command('inspire');
+
+        $called = false;
+
+        $schedule->whenTaskRunsLongerThan(5, function () use (&$called) {
+            $called = true;
+        });
+
+        $events->dispatch(new ScheduledTaskFinished($task, 1.0));
+
+        $this->assertFalse($called);
+
+        $events->dispatch(new ScheduledTaskFinished($task, 10.0));
+
+        $this->assertTrue($called);
+    }
+
+    public function testWhenTaskRunsLongerThanHandlesFailedTasks(): void
+    {
+        $this->container->instance(DispatcherContract::class, $events = new Dispatcher($this->container));
+
+        $schedule = new Schedule();
+        $task = $schedule->command('inspire');
+
+        $called = false;
+
+        $schedule->whenTaskRunsLongerThan(5, function () use (&$called) {
+            $called = true;
+        });
+
+        $events->dispatch(new ScheduledTaskFailed($task, new RuntimeException));
+
+        $this->assertFalse($called);
+
+        $events->dispatch(new ScheduledTaskFailed($task, new RuntimeException, 10.0));
+
+        $this->assertTrue($called);
     }
 }

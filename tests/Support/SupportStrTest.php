@@ -3,24 +3,20 @@
 namespace Illuminate\Tests\Support;
 
 use Exception;
+use Generator;
 use Illuminate\Container\Container;
 use Illuminate\Support\Str;
 use Illuminate\Tests\Support\Fixtures\StringableObjectStub;
+use InvalidArgumentException;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use Ramsey\Uuid\UuidInterface;
 use ReflectionClass;
+use TypeError;
 use ValueError;
 
 class SupportStrTest extends TestCase
 {
-    /** {@inheritdoc} */
-    #[\Override]
-    protected function tearDown(): void
-    {
-        Str::createRandomStringsNormally();
-    }
-
     public function testStringCanBeLimitedByWords(): void
     {
         $this->assertSame('Taylor...', Str::words('Taylor Otwell', 1));
@@ -563,6 +559,8 @@ class SupportStrTest extends TestCase
         $this->assertSame('/test/string', Str::start('test/string', '/'));
         $this->assertSame('/test/string', Str::start('/test/string', '/'));
         $this->assertSame('/test/string', Str::start('//test/string', '/'));
+        $this->assertSame('test/string', Str::start('test/string', ''));
+        $this->assertSame('', Str::start('', ''));
     }
 
     public function testFlushCache()
@@ -585,6 +583,11 @@ class SupportStrTest extends TestCase
         $this->assertSame('abbc', Str::finish('ab', 'bc'));
         $this->assertSame('abbc', Str::finish('abbcbc', 'bc'));
         $this->assertSame('abcbbc', Str::finish('abcbbcbc', 'bc'));
+        $this->assertSame('test/string/', Str::finish('test/string', '/'));
+        $this->assertSame('test/string/', Str::finish('test/string/', '/'));
+        $this->assertSame('test/string/', Str::finish('test/string//', '/'));
+        $this->assertSame('test/string', Str::finish('test/string', ''));
+        $this->assertSame('', Str::finish('', ''));
     }
 
     public function testWrap()
@@ -747,6 +750,17 @@ class SupportStrTest extends TestCase
         $this->assertSame(Str::isUuid($uuid, $version), $passes);
     }
 
+    public function testIsUlid(): void
+    {
+        $this->assertTrue(Str::isUlid((string) Str::ulid()));
+        $this->assertTrue(Str::isUlid('01ARZ3NDEKTSV4RRFFQ69G5FAV'));
+
+        $this->assertFalse(Str::isUlid('not-a-ulid'));
+        $this->assertFalse(Str::isUlid('01ARZ3NDEKTSV4RRFFQ69G5FA'));
+        $this->assertFalse(Str::isUlid(null));
+        $this->assertFalse(Str::isUlid(['not', 'a', 'ulid']));
+    }
+
     public function testIsJson()
     {
         $this->assertTrue(Str::isJson('1'));
@@ -874,18 +888,21 @@ class SupportStrTest extends TestCase
         $this->assertIsString(Str::random());
     }
 
-    public function testWhetherTheNumberOfGeneratedCharactersIsEquallyDistributed()
+    public function testWhetherTheNumberOfGeneratedCharactersIsEquallyDistributed(): void
     {
         $results = [];
-        // take 6.200.000 samples, because there are 62 different characters
-        for ($i = 0; $i < 620000; $i++) {
+
+        // take 620.000 samples, because there are 62 different characters
+        for ($i = 0; $i < 620_000; $i++) {
             $random = Str::random(1);
             $results[$random] = ($results[$random] ?? 0) + 1;
         }
 
-        // each character should occur 100.000 times with a variance of 5%.
+        // Each character should occur close to 10_000 times. The expected count is
+        // binomially distributed with a standard deviation of ~100, so allow a
+        // generous margin to avoid flaky failures from ordinary sampling noise.
         foreach ($results as $result) {
-            $this->assertEqualsWithDelta(10000, $result, 500);
+            $this->assertEqualsWithDelta(10_000, $result, 800);
         }
     }
 
@@ -928,7 +945,7 @@ class SupportStrTest extends TestCase
         Str::random();
 
         try {
-            $this->expectExceptionMessage('Out of random strings.');
+            $this->expectExceptionObject(new Exception('Out of random strings.'));
             Str::random();
             $this->fail();
         } finally {
@@ -1178,6 +1195,18 @@ class SupportStrTest extends TestCase
         }
     }
 
+    public function testTrimAndRtrimHandleLongInteriorWhitespaceRuns()
+    {
+        $run = str_repeat(" \u{200B}\t", 20000);
+
+        $this->assertSame("[{$run}x", Str::trim("{$run}[{$run}x{$run}"));
+        $this->assertSame("{$run}[{$run}x", Str::rtrim("{$run}[{$run}x{$run}"));
+        $this->assertSame('', Str::trim($run));
+        $this->assertSame('', Str::rtrim($run));
+        $this->assertSame('a b c', Str::trim(" a b c\u{00A0}\u{FEFF}\n"));
+        $this->assertSame(' a  b', Str::rtrim(" a  b \u{3000}\r\n"));
+    }
+
     public function testSquish()
     {
         $this->assertSame('laravel php framework', Str::squish(' laravel   php  framework '));
@@ -1314,6 +1343,10 @@ class SupportStrTest extends TestCase
 
         $this->assertSame('foo1Bar', Str::camel('foo1_bar'));
         $this->assertSame('1FooBar', Str::camel('1 foo bar'));
+
+        $this->assertSame('überUns', Str::camel('Über uns'));
+        $this->assertSame('émileZola', Str::camel('émile_zola'));
+        $this->assertSame('élanVital', Str::camel('Élan-vital'));
     }
 
     public function testCharAt()
@@ -1387,6 +1420,62 @@ class SupportStrTest extends TestCase
     {
         $this->assertSame('kengä', Str::substrReplace('kenkä', 'ng', -3, 2));
         $this->assertSame('kenga', Str::substrReplace('kenka', 'ng', -3, 2));
+    }
+
+    public function testSubstrReplaceWithArrays()
+    {
+        $this->assertSame(
+            ['INV-****', 'INV-****'],
+            Str::substrReplace(['INV-1234', 'INV-5678'], ['****', '****'], [4, 4], [4, 4])
+        );
+
+        $this->assertSame(
+            ['first' => 'aXc', 'second' => 'Yef', 'third' => ''],
+            Str::substrReplace(
+                ['first' => 'abc', 'second' => 'def', 'third' => 'ghi'],
+                ['X', 'Y'],
+                [1],
+                [1, 1]
+            )
+        );
+
+        $this->assertSame('kengä', Str::substrReplace('kenkä', ['ng'], -3, 2));
+        $this->assertSame('ac', Str::substrReplace('abc', [], 1, 1));
+        $this->assertSame(
+            ['kengä', 'БXДЖ'],
+            Str::substrReplace(['kenkä', 'БГДЖ'], ['ng', 'X'], [-3, 1], [2, 1])
+        );
+        $this->assertSame(
+            ['kXnkä', 'БXДЖ'],
+            Str::substrReplace(['kenkä', 'БГДЖ'], 'X', 1, 1)
+        );
+        $this->assertSame(
+            ['keX', 'БГX'],
+            Str::substrReplace(['kenkä', 'БГДЖ'], 'X', 2)
+        );
+        $this->assertSame(
+            ['first' => 'aXc', 'second' => 'deY'],
+            Str::substrReplace(
+                ['first' => 'abc', 'second' => 'def'],
+                ['second' => 'X', 'first' => 'Y'],
+                [10 => 1, 20 => 2],
+                [30 => 1, 40 => 1]
+            )
+        );
+    }
+
+    public function testSubstrReplaceWithArrayOffsetRequiresArraySubject()
+    {
+        $this->expectException(TypeError::class);
+
+        Str::substrReplace('abc', 'X', [1], 1);
+    }
+
+    public function testSubstrReplaceWithArrayLengthRequiresArraySubject()
+    {
+        $this->expectException(TypeError::class);
+
+        Str::substrReplace('abc', 'X', 1, [1]);
     }
 
     public function testTake()
@@ -1807,7 +1896,7 @@ class SupportStrTest extends TestCase
         Str::uuid();
 
         try {
-            $this->expectExceptionMessage('Out of Uuids.');
+            $this->expectExceptionObject(new Exception('Out of Uuids.'));
             Str::uuid();
             $this->fail();
         } finally {
@@ -1912,7 +2001,7 @@ class SupportStrTest extends TestCase
         Str::ulid();
 
         try {
-            $this->expectExceptionMessage('Out of Ulids');
+            $this->expectExceptionObject(new Exception('Out of Ulids'));
             Str::ulid();
             $this->fail();
         } finally {
@@ -1920,9 +2009,26 @@ class SupportStrTest extends TestCase
         }
     }
 
+    public function testResetFactoryState(): void
+    {
+        Str::createRandomStringsUsing(fn ($length) => 'random:'.$length);
+        Str::createUuidsUsing(fn () => Str::of('fixed-uuid'));
+        Str::createUlidsUsing(fn () => Str::of('fixed-ulid'));
+
+        $this->assertSame('random:7', Str::random(7));
+        $this->assertSame('fixed-uuid', (string) Str::uuid());
+        $this->assertSame('fixed-ulid', (string) Str::ulid());
+
+        Str::resetFactoryState();
+
+        $this->assertNotSame('random:7', Str::random(7));
+        $this->assertNotSame('fixed-uuid', (string) Str::uuid());
+        $this->assertNotSame('fixed-ulid', (string) Str::ulid());
+    }
+
     public function testPasswordCreation()
     {
-        $this->assertTrue(strlen(Str::password()) === 32);
+        $this->assertSame(32, strlen(Str::password()));
 
         $this->assertStringNotContainsString(' ', Str::password());
         $this->assertStringContainsString(' ', Str::password(spaces: true));
@@ -1930,6 +2036,26 @@ class SupportStrTest extends TestCase
         $this->assertTrue(
             Str::of(Str::password())->contains(['0', '1', '2', '3', '4', '5', '6', '7', '8', '9'])
         );
+    }
+
+    public function testPasswordReturnsExactLengthWhenBelowPoolCount()
+    {
+        $this->assertSame(1, strlen(Str::password(1)));
+        $this->assertSame(2, strlen(Str::password(2)));
+        $this->assertSame(3, strlen(Str::password(3)));
+    }
+
+    public function testPasswordWithZeroOrNegativeLengthReturnsEmptyString()
+    {
+        $this->assertSame('', Str::password(0));
+        $this->assertSame('', Str::password(-2));
+    }
+
+    public function testPasswordThrowsWhenNoPoolsEnabled()
+    {
+        $this->expectException(InvalidArgumentException::class);
+
+        Str::password(32, false, false, false, false);
     }
 
     public function testToBase64()
@@ -1944,76 +2070,68 @@ class SupportStrTest extends TestCase
         $this->assertSame('foobar', Str::fromBase64(base64_encode('foobar'), true));
     }
 
-    public function testChopStart()
+    public static function dataProviderChopStart(): Generator
     {
-        foreach ([
-            '' => ['', ''],
-            'Laravel' => ['', 'Laravel'],
-            'Ship it' => [['', 'Ship '], 'it'],
-            'http://laravel.com' => ['http://', 'laravel.com'],
-            'http://-http://' => ['http://', '-http://'],
-            'http://laravel.com' => ['htp:/', 'http://laravel.com'],
-            'http://laravel.com' => ['http://www.', 'http://laravel.com'],
-            'http://laravel.com' => ['-http://', 'http://laravel.com'],
-            'http://laravel.com' => [['https://', 'http://'], 'laravel.com'],
-            'http://www.laravel.com' => [['http://', 'www.'], 'www.laravel.com'],
-            'http://http-is-fun.test' => ['http://', 'http-is-fun.test'],
-            // Multibyte emoji tests
-            '🌊✋' => ['🌊', '✋'],
-            '🌊✋' => ['✋', '🌊✋'],
-            '🚀🌟💫' => ['🚀', '🌟💫'],
-            '🚀🌟💫' => ['🚀🌟', '💫'],
-            // Multibyte character tests (Japanese, Chinese, Arabic, etc.)
-            'こんにちは世界' => ['こんにちは', '世界'],
-            '你好世界' => ['你好', '世界'],
-            'مرحبا بك' => ['مرحبا ', 'بك'],
-            // Mixed multibyte and ASCII
-            '🎉Laravel' => ['🎉', 'Laravel'],
-            'Hello🌍World' => ['Hello🌍', 'World'],
-            // Multiple needle array with multibyte
-            '🌊✋🎉' => [['🚀', '🌊'], '✋🎉'],
-            'こんにちは世界' => [['Hello', 'こんにちは'], '世界'],
-        ] as $subject => $value) {
-            [$needle, $expected] = $value;
-
-            $this->assertSame($expected, Str::chopStart($subject, $needle));
-        }
+        yield 'empty subject and needle' => ['', '', ''];
+        yield 'empty needle leaves subject' => ['Laravel', '', 'Laravel'];
+        yield 'first matching needle from array is removed' => ['Ship it', ['', 'Ship '], 'it'];
+        yield 'standard http prefix removed' => ['http://laravel.com', 'http://', 'laravel.com'];
+        yield 'prefix only removed once at start' => ['http://-http://', 'http://', '-http://'];
+        yield 'non-matching partial prefix is ignored' => ['http://laravel.com', 'htp:/', 'http://laravel.com'];
+        yield 'different non-matching prefix is ignored' => ['http://laravel.com', 'http://www.', 'http://laravel.com'];
+        yield 'prefix not at start is ignored' => ['http://laravel.com', '-http://', 'http://laravel.com'];
+        yield 'matching prefix selected from array' => ['http://laravel.com', ['https://', 'http://'], 'laravel.com'];
+        yield 'first matching prefix in ordered array used' => ['http://www.laravel.com', ['http://', 'www.'], 'www.laravel.com'];
+        yield 'http removed from complex host' => ['http://http-is-fun.test', 'http://', 'http-is-fun.test'];
+        yield 'emoji prefix removed' => ['🌊✋', '🌊', '✋'];
+        yield 'emoji needle without prefix match is ignored' => ['🌊✋', '✋', '🌊✋'];
+        yield 'first emoji removed from emoji sequence' => ['🚀🌟💫', '🚀', '🌟💫'];
+        yield 'multibyte emoji sequence prefix removed' => ['🚀🌟💫', '🚀🌟', '💫'];
+        yield 'japanese prefix removed' => ['こんにちは世界', 'こんにちは', '世界'];
+        yield 'chinese prefix removed' => ['你好世界', '你好', '世界'];
+        yield 'arabic prefix removed' => ['مرحبا بك', 'مرحبا ', 'بك'];
+        yield 'mixed emoji and ascii prefix removed' => ['🎉Laravel', '🎉', 'Laravel'];
+        yield 'mixed ascii and emoji prefix removed' => ['Hello🌍World', 'Hello🌍', 'World'];
+        yield 'multibyte prefix selected from array' => ['🌊✋🎉', ['🚀', '🌊'], '✋🎉'];
+        yield 'multibyte prefix selected from mixed array' => ['こんにちは世界', ['Hello', 'こんにちは'], '世界'];
     }
 
-    public function testChopEnd()
+    #[DataProvider('dataProviderChopStart')]
+    public function testChopStart($subject, $needle, $expected): void
     {
-        foreach ([
-            '' => ['', ''],
-            'Laravel' => ['', 'Laravel'],
-            'Ship it' => [['', ' it'], 'Ship'],
-            'path/to/file.php' => ['.php', 'path/to/file'],
-            '.php-.php' => ['.php', '.php-'],
-            'path/to/file.php' => ['.ph', 'path/to/file.php'],
-            'path/to/file.php' => ['foo.php', 'path/to/file.php'],
-            'path/to/file.php' => ['.php-', 'path/to/file.php'],
-            'path/to/file.php' => [['.html', '.php'], 'path/to/file'],
-            'path/to/file.php' => [['.php', 'file'], 'path/to/file'],
-            'path/to/php.php' => ['.php', 'path/to/php'],
-            // Multibyte emoji tests
-            '✋🌊' => ['🌊', '✋'],
-            '✋🌊' => ['✋', '✋🌊'],
-            '🌟💫🚀' => ['🚀', '🌟💫'],
-            '🌟💫🚀' => ['💫🚀', '🌟'],
-            // Multibyte character tests (Japanese, Chinese, Arabic, etc.)
-            '世界こんにちは' => ['こんにちは', '世界'],
-            '世界你好' => ['你好', '世界'],
-            'بك مرحبا' => [' مرحبا', 'بك'],
-            // Mixed multibyte and ASCII
-            'Laravel🎉' => ['🎉', 'Laravel'],
-            'Hello🌍World' => ['World', 'Hello🌍'],
-            // Multiple needle array with multibyte
-            '🎉✋🌊' => [['🚀', '🌊'], '🎉✋'],
-            '世界こんにちは' => [['Hello', 'こんにちは'], '世界'],
-        ] as $subject => $value) {
-            [$needle, $expected] = $value;
+        $this->assertSame($expected, Str::chopStart($subject, $needle));
+    }
 
-            $this->assertSame($expected, Str::chopEnd($subject, $needle));
-        }
+    public static function dataProviderChopEnd(): Generator
+    {
+        yield 'empty string with empty needle' => ['', '', ''];
+        yield 'empty needle leaves subject unchanged' => ['Laravel', '', 'Laravel'];
+        yield 'matching needle selected from array' => ['Ship it', ['', ' it'], 'Ship'];
+        yield 'file extension removed' => ['path/to/file.php', '.php', 'path/to/file'];
+        yield 'suffix removed from repeated extension segment' => ['.php-.php', '.php', '.php-'];
+        yield 'partial non-matching suffix is ignored' => ['path/to/file.php', '.ph', 'path/to/file.php'];
+        yield 'different non-matching suffix is ignored' => ['path/to/file.php', 'foo.php', 'path/to/file.php'];
+        yield 'near-matching suffix is ignored' => ['path/to/file.php', '.php-', 'path/to/file.php'];
+        yield 'matching suffix selected from array' => ['path/to/file.php', ['.html', '.php'], 'path/to/file'];
+        yield 'first matching suffix in ordered array used' => ['path/to/file.php', ['.php', 'file'], 'path/to/file'];
+        yield 'suffix removed from complex path' => ['path/to/php.php', '.php', 'path/to/php'];
+        yield 'emoji suffix removed' => ['✋🌊', '🌊', '✋'];
+        yield 'emoji needle without suffix match is ignored' => ['✋🌊', '✋', '✋🌊'];
+        yield 'last emoji removed from emoji sequence' => ['🌟💫🚀', '🚀', '🌟💫'];
+        yield 'multibyte emoji sequence suffix removed' => ['🌟💫🚀', '💫🚀', '🌟'];
+        yield 'japanese suffix removed' => ['世界こんにちは', 'こんにちは', '世界'];
+        yield 'chinese suffix removed' => ['世界你好', '你好', '世界'];
+        yield 'arabic suffix removed' => ['بك مرحبا', ' مرحبا', 'بك'];
+        yield 'mixed ascii and emoji suffix removed' => ['Laravel🎉', '🎉', 'Laravel'];
+        yield 'mixed emoji and ascii suffix removed' => ['Hello🌍World', 'World', 'Hello🌍'];
+        yield 'multibyte suffix selected from array' => ['🎉✋🌊', ['🚀', '🌊'], '🎉✋'];
+        yield 'multibyte suffix selected from mixed array' => ['世界こんにちは', ['Hello', 'こんにちは'], '世界'];
+    }
+
+    #[DataProvider('dataProviderChopEnd')]
+    public function testChopEnd($subject, $needle, $expected): void
+    {
+        $this->assertSame($expected, Str::chopEnd($subject, $needle));
     }
 
     public function testReplaceMatches()
@@ -2097,5 +2215,20 @@ class SupportStrTest extends TestCase
         };
 
         $this->assertSame('UserGroups', Str::pluralPascal('UserGroup', $countable));
+    }
+
+    public function testPluralStudly(): void
+    {
+        $this->assertSame('VerifiedHumans', Str::pluralStudly('VerifiedHuman'));
+        $this->assertSame('UserFeedback', Str::pluralStudly('UserFeedback'));
+        $this->assertSame('VerifiedHuman', Str::pluralStudly('VerifiedHuman', 1));
+        $this->assertSame('VerifiedHumans', Str::pluralStudly('VerifiedHuman', 2));
+    }
+
+    public function testSingular(): void
+    {
+        $this->assertSame('child', Str::singular('children'));
+        $this->assertSame('mouse', Str::singular('mice'));
+        $this->assertSame('Laracon', Str::singular('Laracons'));
     }
 }

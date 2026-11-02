@@ -2,7 +2,6 @@
 
 namespace Illuminate\Tests\Console;
 
-use Illuminate\Console\Application;
 use Illuminate\Console\Attributes\Aliases;
 use Illuminate\Console\Attributes\Help;
 use Illuminate\Console\Attributes\Hidden;
@@ -12,18 +11,26 @@ use Illuminate\Console\Command;
 use Illuminate\Console\CommandInput;
 use Illuminate\Console\OutputStyle;
 use Illuminate\Console\View\Components\Factory;
+use Illuminate\Foundation\Application as FoundationApplication;
 use Illuminate\Support\Carbon;
-use Mockery as m;
+use Illuminate\Tests\Console\Concerns\CreatesAnsweredOutputStyles;
+use Laravel\Prompts\Prompt;
+use Mockery;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\Console\Input\ArrayInput;
 use Symfony\Component\Console\Input\InputArgument;
-use Symfony\Component\Console\Input\InputInterface;
 use Symfony\Component\Console\Input\InputOption;
 use Symfony\Component\Console\Output\NullOutput;
-use Symfony\Component\Console\Question\ChoiceQuestion;
 
 class CommandTest extends TestCase
 {
+    use CreatesAnsweredOutputStyles;
+
+    protected function tearDown(): void
+    {
+        Prompt::setOutput(new NullOutput);
+    }
+
     public function testCallingClassCommandResolveCommandViaApplicationResolution()
     {
         $command = new class extends Command
@@ -33,23 +40,23 @@ class CommandTest extends TestCase
             }
         };
 
-        $application = m::mock(Application::class);
+        $application = Mockery::mock(FoundationApplication::class);
         $command->setLaravel($application);
 
         $input = new ArrayInput([]);
         $output = new NullOutput;
-        $outputStyle = m::mock(OutputStyle::class);
-        $application->shouldReceive('make')->with(OutputStyle::class, ['input' => $input, 'output' => $output])->andReturn($outputStyle);
-        $application->shouldReceive('make')->with(Factory::class, ['output' => $outputStyle])->andReturn(m::mock(Factory::class));
+        $outputStyle = new OutputStyle($input, $output);
+        $application->expects('make')->with(OutputStyle::class, ['input' => $input, 'output' => $output])->andReturn($outputStyle);
+        $application->expects('make')->with(Factory::class, ['output' => $outputStyle])->andReturn(new Factory($outputStyle));
 
-        $application->shouldReceive('call')->with([$command, 'handle'])->andReturnUsing(function () use ($command, $application) {
-            $commandCalled = m::mock(Command::class);
+        $application->expects('call')->with([$command, 'handle'])->andReturnUsing(function () use ($command, $application) {
+            $commandCalled = Mockery::mock(Command::class);
 
-            $application->shouldReceive('make')->once()->with(Command::class)->andReturn($commandCalled);
+            $application->expects('make')->with(Command::class)->andReturn($commandCalled);
 
-            $commandCalled->shouldReceive('setApplication')->once()->with(null);
-            $commandCalled->shouldReceive('setLaravel')->once()->with($application);
-            $commandCalled->shouldReceive('run')->once();
+            $commandCalled->expects('setApplication')->with(null);
+            $commandCalled->expects('setLaravel')->with($application);
+            $commandCalled->expects('run');
 
             $command->call(Command::class);
         });
@@ -95,7 +102,7 @@ class CommandTest extends TestCase
             }
         };
 
-        $application = app();
+        $application = new FoundationApplication(__DIR__);
         $command->setLaravel($application);
 
         $input = new ArrayInput([
@@ -142,7 +149,8 @@ class CommandTest extends TestCase
             }
         };
 
-        $application = m::mock(Application::class);
+        $application = new FoundationApplication;
+        $application['env'] = 'testing';
         $command->setLaravel($application);
 
         $input = new ArrayInput([
@@ -153,11 +161,6 @@ class CommandTest extends TestCase
             '--role' => 'user',
         ]);
         $output = new NullOutput;
-        $outputStyle = m::mock(OutputStyle::class);
-        $application->shouldReceive('make')->with(OutputStyle::class, ['input' => $input, 'output' => $output])->andReturn($outputStyle);
-        $application->shouldReceive('make')->with(Factory::class, ['output' => $outputStyle])->andReturn(m::mock(Factory::class));
-        $application->shouldReceive('runningUnitTests')->andReturn(true);
-        $application->shouldReceive('call')->with([$command, 'handle'])->andReturn(0);
 
         $command->run($input, $output);
 
@@ -178,19 +181,16 @@ class CommandTest extends TestCase
 
     public function testTheInputSetterOverwrite()
     {
-        $input = m::mock(InputInterface::class);
-        $input->shouldReceive('hasArgument')->once()->with('foo')->andReturn(false);
-
         $command = new Command;
-        $command->setInput($input);
+        $command->setInput(new ArrayInput([]));
 
         $this->assertFalse($command->hasArgument('foo'));
     }
 
     public function testTheOutputSetterOverwrite()
     {
-        $output = m::mock(OutputStyle::class);
-        $output->shouldReceive('writeln')->once()->withArgs(function (...$args) {
+        $output = Mockery::mock(OutputStyle::class);
+        $output->expects('writeln')->withArgs(function (...$args) {
             return $args[0] === '<info>foo</info>';
         });
 
@@ -254,28 +254,22 @@ class CommandTest extends TestCase
 
     public function testChoiceIsSingleSelectByDefault()
     {
-        $output = m::mock(OutputStyle::class);
-        $output->shouldReceive('askQuestion')->once()->withArgs(function (ChoiceQuestion $question) {
-            return $question->isMultiselect() === false;
-        });
-
         $command = new Command;
-        $command->setOutput($output);
+        $command->setOutput($this->outputStyleWithAnswer('yes'));
 
-        $command->choice('Do you need further help?', ['yes', 'no']);
+        $answer = $command->choice('Do you need further help?', ['yes', 'no']);
+
+        $this->assertSame('yes', $answer);
     }
 
     public function testChoiceWithMultiselect()
     {
-        $output = m::mock(OutputStyle::class);
-        $output->shouldReceive('askQuestion')->once()->withArgs(function (ChoiceQuestion $question) {
-            return $question->isMultiselect() === true;
-        });
-
         $command = new Command;
-        $command->setOutput($output);
+        $command->setOutput($this->outputStyleWithAnswer('option-1,option-2'));
 
-        $command->choice('Select all that apply.', ['option-1', 'option-2', 'option-3'], null, null, true);
+        $answer = $command->choice('Select all that apply.', ['option-1', 'option-2', 'option-3'], null, null, true);
+
+        $this->assertSame(['option-1', 'option-2'], $answer);
     }
 
     public function testSignatureAttributeCanSetAliases()

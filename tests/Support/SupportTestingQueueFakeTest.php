@@ -4,6 +4,7 @@ namespace Illuminate\Tests\Support;
 
 use BadMethodCallException;
 use Illuminate\Bus\Queueable;
+use Illuminate\Database\Eloquent\Model;
 use Illuminate\Foundation\Application;
 use Illuminate\Queue\Attributes\Delay;
 use Illuminate\Queue\CallQueuedClosure;
@@ -11,7 +12,7 @@ use Illuminate\Queue\Jobs\InspectedJob;
 use Illuminate\Queue\QueueManager;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Testing\Fakes\QueueFake;
-use Mockery as m;
+use Mockery;
 use PHPUnit\Framework\ExpectationFailedException;
 use PHPUnit\Framework\TestCase;
 
@@ -65,8 +66,8 @@ class SupportTestingQueueFakeTest extends TestCase
     {
         $job = new JobStub;
 
-        $manager = m::mock(QueueManager::class);
-        $manager->shouldReceive('push')->once()->withArgs(function ($passedJob) use ($job) {
+        $manager = Mockery::mock(QueueManager::class);
+        $manager->expects('push')->withArgs(function ($passedJob) use ($job) {
             return $passedJob === $job;
         });
 
@@ -86,6 +87,26 @@ class SupportTestingQueueFakeTest extends TestCase
         $this->fake->assertPushed(function (JobStub $job) {
             return true;
         });
+    }
+
+    public function testAssertPushedWithArrayOfProperties()
+    {
+        $this->fake->pushOn('high', new JobWithPropertiesStub('pending', new ModelForQueueFakeStub(['id' => 1])));
+
+        $this->fake->assertPushed(JobWithPropertiesStub::class, ['status' => 'pending', 'model' => new ModelForQueueFakeStub(['id' => 1])]);
+        $this->fake->assertPushedOn('high', JobWithPropertiesStub::class, ['status' => 'pending']);
+        $this->fake->assertNotPushed(JobWithPropertiesStub::class, ['status' => 'complete']);
+        $this->fake->assertNotPushed(JobWithPropertiesStub::class, ['model' => new ModelForQueueFakeStub(['id' => 2])]);
+    }
+
+    public function testAssertPushedWithArrayOfPropertiesDoesNotMatchMissingOrMismatchedProperties()
+    {
+        $this->fake->push(new JobWithPropertiesStub('pending'));
+
+        $this->fake->assertNotPushed(JobWithPropertiesStub::class, ['status' => new ModelForQueueFakeStub(['id' => 1])]);
+        $this->fake->assertNotPushed(JobWithPropertiesStub::class, ['model' => new ModelForQueueFakeStub(['id' => 1])]);
+        $this->fake->assertNotPushed(JobWithPropertiesStub::class, ['missing' => null]);
+        $this->fake->assertPushed(JobWithPropertiesStub::class, ['model' => null]);
     }
 
     public function testQueueSize()
@@ -421,8 +442,8 @@ class SupportTestingQueueFakeTest extends TestCase
     {
         $job = new JobStub;
 
-        $manager = m::mock(QueueManager::class);
-        $manager->shouldReceive('push')->once()->withArgs(function ($passedJob) use ($job) {
+        $manager = Mockery::mock(QueueManager::class);
+        $manager->expects('push')->withArgs(function ($passedJob) use ($job) {
             return $passedJob === $job;
         });
 
@@ -488,8 +509,8 @@ class SupportTestingQueueFakeTest extends TestCase
         $job = new JobStub;
         $steps = [];
 
-        $manager = m::mock(QueueManager::class);
-        $manager->shouldReceive('push')->once()->withArgs(function ($passedJob, $passedData, $passedQueue) use ($job) {
+        $manager = Mockery::mock(QueueManager::class);
+        $manager->expects('push')->withArgs(function ($passedJob, $passedData, $passedQueue) use ($job) {
             return $passedJob === $job && $passedData === ['foo' => 'bar'] && $passedQueue === 'redis';
         });
 
@@ -603,6 +624,7 @@ class SupportTestingQueueFakeTest extends TestCase
 
         $this->assertCount(1, $pending);
         $this->assertInstanceOf(InspectedJob::class, $pending->first());
+        $this->assertIsString($pending->first()->uuid);
         $this->assertSame(JobStub::class, $pending->first()->name);
         $this->assertSame(0, $pending->first()->attempts);
         $this->assertSame('foo', $pending->first()->queue);
@@ -628,8 +650,26 @@ class SupportTestingQueueFakeTest extends TestCase
 
         $this->assertCount(2, $pending);
         $this->assertInstanceOf(InspectedJob::class, $pending->first());
+        $this->assertCount(2, $pending->pluck('uuid')->unique());
         $this->assertTrue($pending->contains(fn ($job) => $job->name === JobStub::class));
         $this->assertTrue($pending->contains(fn ($job) => $job->name === JobToFakeStub::class));
+    }
+
+    public function testTotalSize()
+    {
+        $this->fake->push($this->job, '', 'foo');
+        $this->fake->later(10, new JobToFakeStub, '', 'bar');
+        $this->fake->reserve(new JobToFakeStub, 'baz');
+
+        $this->assertSame(3, $this->fake->totalSize());
+    }
+
+    public function testTotalPendingSize()
+    {
+        $this->fake->push($this->job, '', 'foo');
+        $this->fake->push(new JobToFakeStub, '', 'bar');
+
+        $this->assertSame(2, $this->fake->totalPendingSize());
     }
 
     public function testDelayedJobs()
@@ -641,6 +681,7 @@ class SupportTestingQueueFakeTest extends TestCase
 
         $this->assertCount(1, $delayed);
         $this->assertInstanceOf(InspectedJob::class, $delayed->first());
+        $this->assertIsString($delayed->first()->uuid);
         $this->assertSame(JobStub::class, $delayed->first()->name);
         $this->assertSame(0, $delayed->first()->attempts);
         $this->assertSame('foo', $delayed->first()->queue);
@@ -655,8 +696,17 @@ class SupportTestingQueueFakeTest extends TestCase
 
         $this->assertCount(2, $delayed);
         $this->assertInstanceOf(InspectedJob::class, $delayed->first());
+        $this->assertCount(2, $delayed->pluck('uuid')->unique());
         $this->assertTrue($delayed->contains(fn ($job) => $job->name === JobStub::class));
         $this->assertTrue($delayed->contains(fn ($job) => $job->name === JobToFakeStub::class));
+    }
+
+    public function testTotalDelayedSize()
+    {
+        $this->fake->later(10, $this->job, '', 'foo');
+        $this->fake->later(10, new JobToFakeStub, '', 'bar');
+
+        $this->assertSame(2, $this->fake->totalDelayedSize());
     }
 
     public function testDelayedSize()
@@ -700,6 +750,7 @@ class SupportTestingQueueFakeTest extends TestCase
 
         $this->assertCount(1, $reserved);
         $this->assertInstanceOf(InspectedJob::class, $reserved->first());
+        $this->assertIsString($reserved->first()->uuid);
         $this->assertSame(JobStub::class, $reserved->first()->name);
         $this->assertSame(0, $reserved->first()->attempts);
         $this->assertSame('foo', $reserved->first()->queue);
@@ -716,6 +767,14 @@ class SupportTestingQueueFakeTest extends TestCase
         $this->assertInstanceOf(InspectedJob::class, $reserved->first());
         $this->assertTrue($reserved->contains(fn ($job) => $job->name === JobStub::class));
         $this->assertTrue($reserved->contains(fn ($job) => $job->name === JobToFakeStub::class));
+    }
+
+    public function testTotalReservedSize()
+    {
+        $this->fake->reserve($this->job, 'foo');
+        $this->fake->reserve(new JobToFakeStub, 'bar');
+
+        $this->assertSame(2, $this->fake->totalReservedSize());
     }
 
     public function testReservedSize()
@@ -822,6 +881,18 @@ class JobToFakeStub
     {
         //
     }
+}
+
+class JobWithPropertiesStub
+{
+    public function __construct(public string $status, public ?ModelForQueueFakeStub $model = null)
+    {
+    }
+}
+
+class ModelForQueueFakeStub extends Model
+{
+    protected $guarded = [];
 }
 
 #[Delay(15)]
